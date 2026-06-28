@@ -1,0 +1,18 @@
+# Local environment variables (contains private API keys)
+.env
+
+# Local SQLite database
+scheduler.db
+
+# Daily generated briefing outputs
+daily_briefing.txt
+briefing.mp3
+briefing_*.mp3
+
+# Python caches and virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+.env/
