@@ -1,6 +1,8 @@
 import os
 import tempfile
 import asyncio
+import socket
+import sys
 from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
 
@@ -24,8 +26,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status_msg = await update.message.reply_text("🧠 Analyzing task details...")
     
     try:
-        # Pass to Groq brain for structured parsing (now returns a list of tasks)
-        extracted_tasks = brain.parse_input(user_message)
+        # Pass to Groq brain for structured parsing in a separate thread to avoid blocking the event loop
+        extracted_tasks = await asyncio.to_thread(brain.parse_input, user_message)
         
         saved_details = []
         for task in extracted_tasks:
@@ -68,19 +70,21 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await file_info.download_to_drive(temp_path)
         await status_msg.edit_text("⚡ Transcribing audio with Groq Whisper...")
         
-        # Transcribe audio using Groq client
+        # Transcribe audio using Groq client in a separate thread to avoid blocking the event loop
         client = brain.get_client()
-        with open(temp_path, "rb") as audio_file:
-            transcription = client.audio.transcriptions.create(
-                file=audio_file,
-                model="whisper-large-v3"
-            )
+        def transcribe_audio():
+            with open(temp_path, "rb") as audio_file:
+                return client.audio.transcriptions.create(
+                    file=audio_file,
+                    model="whisper-large-v3"
+                )
+        transcription = await asyncio.to_thread(transcribe_audio)
             
         transcribed_text = transcription.text
         await status_msg.edit_text(f"📝 *Transcribed:* \"{transcribed_text}\"\n\n🧠 Analyzing task details...")
         
-        # Parse tasks using LLM brain (now returns a list of tasks)
-        extracted_tasks = brain.parse_input(transcribed_text)
+        # Parse tasks using LLM brain in a separate thread to avoid blocking the event loop
+        extracted_tasks = await asyncio.to_thread(brain.parse_input, transcribed_text)
         
         saved_details = []
         for task in extracted_tasks:
@@ -149,6 +153,15 @@ async def done_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Error completing task: {e}")
 
 def main():
+    # Socket lock to prevent multiple instances
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind(('127.0.0.1', 49152))
+        globals()['_instance_lock_socket'] = s
+    except OSError:
+        print("Error: Another instance of telegram_ingest.py is already running. Exiting.")
+        sys.exit(0)
+
     if not config.TELEGRAM_BOT_TOKEN:
         print("Error: TELEGRAM_BOT_TOKEN is not set. Cannot run bot.")
         return
@@ -164,8 +177,8 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     application.add_handler(MessageHandler(filters.VOICE, handle_voice))
     
-    # Run the bot polling
-    application.run_polling()
+    # Run the bot polling, retrying indefinitely on bootstrap failures (e.g. network offline on boot)
+    application.run_polling(bootstrap_retries=-1, drop_pending_updates=False)
 
 if __name__ == "__main__":
     main()
